@@ -4,6 +4,8 @@ from collections.abc import AsyncGenerator, Sequence
 import json
 import os
 import types
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
@@ -359,11 +361,56 @@ class GenericBackend:
     ) -> HTTPResponse:
         client = self._get_client()
         response = await client.post(url, content=data, headers=headers)
-        response.raise_for_status()
+
+        if not response.is_success:
+            self._dump_http_error(url, data, headers, response)
+            response.raise_for_status()
 
         response_headers = dict(response.headers.items())
         response_body = response.json()
         return self.HTTPResponse(response_body, response_headers)
+
+    def _dump_http_error(
+        self,
+        url: str,
+        request_data: bytes,
+        request_headers: dict[str, str],
+        response: httpx.Response,
+    ) -> None:
+        """Dump HTTP request/response to debug directory on error."""
+        debug_dir = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")) / "vibe" / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        request_file = debug_dir / f"error_{timestamp}_request.json"
+        response_file = debug_dir / f"error_{timestamp}_response.json"
+
+        try:
+            request_body = json.loads(request_data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            request_body = {"raw": request_data.decode("utf-8", errors="replace")}
+
+        request_dump = {
+            "timestamp": datetime.now().isoformat(),
+            "url": url,
+            "method": "POST",
+            "headers": {k: v for k, v in request_headers.items() if k.lower() != "authorization"},
+            "body": request_body,
+        }
+
+        try:
+            response_body = response.json()
+        except json.JSONDecodeError:
+            response_body = {"raw": response.text}
+
+        response_dump = {
+            "status_code": response.status_code,
+            "headers": dict(response.headers.items()),
+            "body": response_body,
+        }
+
+        request_file.write_text(json.dumps(request_dump, indent=2))
+        response_file.write_text(json.dumps(response_dump, indent=2))
 
     @async_generator_retry(tries=3)
     async def _make_streaming_request(
@@ -375,6 +422,7 @@ class GenericBackend:
         ) as response:
             if not response.is_success:
                 await response.aread()
+                self._dump_http_error(url, data, headers, response)
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.strip() == "":
