@@ -228,7 +228,8 @@ class LLMMessage(BaseModel):
     @classmethod
     def _from_any(cls, v: Any) -> dict[str, Any] | Any:
         if isinstance(v, dict):
-            v.setdefault("content", "")
+            if v.get("content") is None:
+                v["content"] = ""
             v.setdefault("role", "assistant")
             if v.get("message_id") is None and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
